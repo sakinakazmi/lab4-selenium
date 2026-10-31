@@ -1,12 +1,9 @@
-import re, heapq
+import re, heapq, time
 from collections import Counter
 from flask import Flask, request, jsonify
 from selenium import webdriver
-from selenium.webdriver.common.by import By
 from selenium.webdriver.chrome.service import Service
 from selenium.webdriver.chrome.options import Options
-from selenium.webdriver.support.ui import WebDriverWait
-from selenium.webdriver.support import expected_conditions as EC
 
 REG = "FA23-BDS-055"
 SOURCE = "Wired Magazine"
@@ -22,6 +19,38 @@ def make_driver():
               "(KHTML, like Gecko) Chrome/120 Safari/537.36"]:
         o.add_argument(a)
     return webdriver.Chrome(service=Service("/usr/bin/chromedriver"), options=o)
+
+
+def first_story_url(d, timeout=30):
+    """Read the first article link with JavaScript (avoids stale element errors)."""
+    end = time.time() + timeout
+    while time.time() < end:
+        try:
+            hrefs = d.execute_script(
+                "return Array.from(document.querySelectorAll(\"a[href*='/story/']\"))"
+                ".map(a => a.href);")
+            if hrefs:
+                return hrefs[0]
+        except Exception:
+            pass
+        time.sleep(1)
+    return ""
+
+
+def article_text(d, timeout=30):
+    """Collect paragraph text with JavaScript, retrying until text appears."""
+    end = time.time() + timeout
+    while time.time() < end:
+        try:
+            text = d.execute_script(
+                "return Array.from(document.querySelectorAll('p'))"
+                ".map(p => p.innerText).filter(t => t.length > 40).join(' ');")
+            if text and len(text) > 200:
+                return text
+        except Exception:
+            pass
+        time.sleep(1)
+    return ""
 
 
 def summarize(text, n=3):
@@ -42,18 +71,20 @@ def home():
 @app.route("/get")
 def get():
     kw = request.args.get("keyword", "")
+    url, summary = "", ""
     d = make_driver()
     try:
         d.get(f"https://www.wired.com/search/?q={kw}")
-        link = WebDriverWait(d, 20).until(
-            EC.presence_of_element_located((By.CSS_SELECTOR, "a[href*='/story/']")))
-        url = link.get_attribute("href")
+        url = first_story_url(d)
+        if not url:
+            raise Exception("no article link found on search page")
         d.get(url)
-        WebDriverWait(d, 20).until(EC.presence_of_element_located((By.TAG_NAME, "p")))
-        text = " ".join(p.text for p in d.find_elements(By.TAG_NAME, "p") if len(p.text) > 40)
+        text = article_text(d)
+        if not text:
+            raise Exception("could not read article text")
         summary = summarize(text)
     except Exception as e:
-        url, summary = "", f"error: {e}"
+        summary = f"error: {e}"
     finally:
         d.quit()
     return jsonify({"registration": REG, "newssource": SOURCE,
